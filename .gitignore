@@ -1,0 +1,36 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+.env
+.env.*
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Tests / notebooks cache
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Triton / misc
+.triton/
+
+# Large model assets (keep out of git)
+Qwen3-0.6B/
+*.safetensors
+*.pt
+*.bin
+
+# Others
+scripts/
