@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# 模型权重
+qwen3-0-6B/
+Qwen3-0-6B/
+*.bin
+*.safetensors
+*.pth
+*.ckpt
+
+# 调试输出
+*_debug.txt
+hf_debug*.txt
+torch_debug*.txt
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
