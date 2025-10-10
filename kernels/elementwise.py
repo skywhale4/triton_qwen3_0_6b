@@ -83,8 +83,6 @@ def multiply_kernel(
 
 
 def triton_softmax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
-
-    assert x.is_cuda
     
     if dim != -1 and dim != x.dim() - 1:
         x = x.transpose(dim, -1)
@@ -114,8 +112,6 @@ def triton_softmax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
 
 def triton_add(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-
-    assert a.is_cuda and b.is_cuda
     assert a.shape == b.shape
     
     a_flat = a.reshape(-1)
@@ -176,8 +172,6 @@ def sin_kernel(
 
 def triton_cos(x: torch.Tensor) -> torch.Tensor:
 
-    assert x.is_cuda
-
     x_flat = x.reshape(-1)
     out_flat = torch.empty_like(x_flat)
 
@@ -195,8 +189,6 @@ def triton_cos(x: torch.Tensor) -> torch.Tensor:
 
 
 def triton_sin(x: torch.Tensor) -> torch.Tensor:
-
-    assert x.is_cuda
 
     x_flat = x.reshape(-1)
     out_flat = torch.empty_like(x_flat)
@@ -248,8 +240,6 @@ def argmax_kernel(
 
 def triton_argmax(x: torch.Tensor) -> int:
 
-    assert x.is_cuda
-
     flat = x.reshape(-1)
     idx_out = torch.empty(1, device=x.device, dtype=torch.int32)
     val_out = torch.empty(1, device=x.device, dtype=torch.float32)
@@ -269,8 +259,6 @@ def triton_argmax(x: torch.Tensor) -> int:
 
 
 def triton_multiply(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-
-    assert a.is_cuda and b.is_cuda
     assert a.shape == b.shape
     
     a_flat = a.reshape(-1)

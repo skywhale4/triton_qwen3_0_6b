@@ -33,8 +33,6 @@ def _embedding_kernel(
 
 
 def triton_embedding(input_ids: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    
-    assert input_ids.is_cuda and weight.is_cuda
     assert input_ids.dtype in (torch.int32, torch.int64)
 
     flat_ids = input_ids.contiguous().view(-1)

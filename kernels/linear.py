@@ -1,4 +1,5 @@
 import torch
+
 from .matmul import _matmul_2d
 
 
@@ -8,7 +9,6 @@ def triton_linear(
     bias: torch.Tensor = None
 ) -> torch.Tensor:
 
-    assert x.is_cuda and weight.is_cuda
     assert x.shape[-1] == weight.shape[1], f"Feature mismatch: {x.shape[-1]} vs {weight.shape[1]}"
     
             

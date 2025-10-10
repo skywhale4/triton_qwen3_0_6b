@@ -48,8 +48,6 @@ def rms_norm_kernel(
 
 
 def triton_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-
-    assert x.is_cuda and weight.is_cuda, "Triton requires CUDA tensors"
     assert x.shape[-1] == weight.shape[0], f"Shape mismatch"
     
                    

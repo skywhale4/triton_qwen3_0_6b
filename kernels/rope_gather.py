@@ -37,8 +37,6 @@ def _gather_kernel(
 
 
 def triton_gather_rope(table: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-    
-    assert table.is_cuda and positions.is_cuda
     S = positions.numel()
     D = table.shape[1]
 

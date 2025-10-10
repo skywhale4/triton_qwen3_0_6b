@@ -27,7 +27,6 @@ def _argmax_blocks_kernel(
 
 
 def triton_argmax(x: torch.Tensor) -> int:
-    assert x.is_cuda
 
     flat = x.reshape(-1)
     n = flat.numel()

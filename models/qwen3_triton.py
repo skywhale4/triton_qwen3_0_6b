@@ -10,21 +10,16 @@ from models.qwen3_torch import (
 )
 
                 
-try:
-    from kernels.rms_norm import triton_rms_norm
-    from kernels.rope import triton_rope
-    from kernels.swiglu import triton_swiglu_activation
-    from kernels.elementwise import triton_softmax, triton_add
-    from kernels.rope_gather import triton_gather_rope
-    from kernels.matmul import triton_matmul
-    from kernels.linear import triton_linear
-    from kernels.embedding import triton_embedding
-    from kernels.cache import triton_kv_concat
-    from kernels.repeat import triton_repeat_kv_heads
-    TRITON_AVAILABLE = True
-except ImportError:
-    TRITON_AVAILABLE = False
-    print("Warning: Triton kernels not available, falling back to PyTorch")
+from kernels.rms_norm import triton_rms_norm
+from kernels.rope import triton_rope
+from kernels.swiglu import triton_swiglu_activation
+from kernels.elementwise import triton_softmax, triton_add
+from kernels.rope_gather import triton_gather_rope
+from kernels.matmul import triton_matmul
+from kernels.linear import triton_linear
+from kernels.embedding import triton_embedding
+from kernels.cache import triton_kv_concat
+from kernels.repeat import triton_repeat_kv_heads
 
 
 
@@ -36,7 +31,7 @@ class TritonRMSNorm(nn.Module):
         self.use_triton = use_triton
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.use_triton and TRITON_AVAILABLE:
+        if self.use_triton:
             return triton_rms_norm(x, self.weight, self.eps)
         
                     
@@ -62,7 +57,7 @@ class TritonRotaryEmbedding(nn.Module):
         self.register_buffer("sin", sin, persistent=False)
     
     def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        if self.use_triton and TRITON_AVAILABLE:
+        if self.use_triton:
             cos = triton_gather_rope(self.cos, positions).unsqueeze(0).unsqueeze(0)
             sin = triton_gather_rope(self.sin, positions).unsqueeze(0).unsqueeze(0)
             return triton_rope(x, cos, sin)
@@ -108,7 +103,7 @@ class TritonQwen3Attention(nn.Module):
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         B, S, _ = x.shape
 
-        if self.use_triton and TRITON_AVAILABLE:
+        if self.use_triton:
             q = self._shape(triton_linear(x, self.q_proj.weight), self.n_heads)
             k = self._shape(triton_linear(x, self.k_proj.weight), self.n_kv_heads)
             v = self._shape(triton_linear(x, self.v_proj.weight), self.n_kv_heads)
@@ -132,7 +127,7 @@ class TritonQwen3Attention(nn.Module):
 
         if past_kv is not None:
             pk, pv = past_kv
-            if self.use_triton and TRITON_AVAILABLE:
+            if self.use_triton:
                 k = triton_kv_concat(pk, k)
                 v = triton_kv_concat(pv, v)
             else:
@@ -140,7 +135,7 @@ class TritonQwen3Attention(nn.Module):
                 v = torch.cat([pv, v], dim=2)
 
         groups = self.n_heads // self.n_kv_heads
-        if self.use_triton and TRITON_AVAILABLE:
+        if self.use_triton:
             k_rep = triton_repeat_kv_heads(k, groups)
             v_rep = triton_repeat_kv_heads(v, groups)
         else:
@@ -148,7 +143,7 @@ class TritonQwen3Attention(nn.Module):
             v_rep = v.repeat_interleave(groups, dim=1)
 
                       
-        if self.use_triton and TRITON_AVAILABLE:
+        if self.use_triton:
                                
                      
             k_t = k_rep.transpose(-2, -1)
@@ -176,7 +171,7 @@ class TritonQwen3Attention(nn.Module):
             context = torch.matmul(attn_probs, v_rep)
         context = context.transpose(1, 2).contiguous().view(B, S, self.n_heads * self.head_dim)
         
-        if self.use_triton and TRITON_AVAILABLE:
+        if self.use_triton:
             out = triton_linear(context, self.o_proj.weight)
         else:
             out = self.o_proj(context)
@@ -203,7 +198,7 @@ class TritonQwen3MLP(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_swiglu:
-            if self.use_triton and TRITON_AVAILABLE:
+            if self.use_triton:
                                   
                 gate_out = triton_linear(x, self.gate_proj.weight)
                 up_out = triton_linear(x, self.up_proj.weight)
@@ -236,7 +231,7 @@ class TritonQwen3DecoderLayer(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         attn_out, kv = self.self_attn(self.attn_norm(x), positions, past_kv=past_kv, attn_mask=attn_mask)
-        if self.self_attn.use_triton and TRITON_AVAILABLE:
+        if self.self_attn.use_triton:
             h = triton_add(x, attn_out)
             o = triton_add(h, self.mlp(self.mlp_norm(h)))
         else:
@@ -269,7 +264,7 @@ class TritonQwen3Model(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[List[Tuple[torch.Tensor, torch.Tensor]]], Optional[List[torch.Tensor]]]:
         B, S = input_ids.shape
         device = input_ids.device
-        if self.use_triton and TRITON_AVAILABLE:
+        if self.use_triton:
             x = triton_embedding(input_ids, self.tok_embeddings.weight)
         else:
             x = self.tok_embeddings(input_ids)
@@ -336,7 +331,7 @@ class TritonQwen3ForCausalLM(nn.Module):
         h, new_kvs, all_hidden = self.model(
             input_ids, past_kvs=past_kvs, use_cache=use_cache, output_hidden_states=output_hidden_states
         )
-        if self.use_triton and TRITON_AVAILABLE:
+        if self.use_triton:
             logits = triton_linear(h[:, -1:, :], self.lm_head.weight)
         else:
             logits = self.lm_head(h[:, -1:, :])

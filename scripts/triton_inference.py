@@ -1,7 +1,7 @@
 import argparse
 import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -20,6 +20,19 @@ def pick_argmax(logits: torch.Tensor) -> int:
     return int(torch.argmax(logits).item())
 
 
+def format_tokens(tokenizer, token_ids: List[int]) -> str:
+    if not token_ids:
+        return "<empty>"
+    parts = []
+    for tid in token_ids:
+        text = tokenizer.decode([tid], skip_special_tokens=False)
+        display = text.replace("\n", "\\n").replace("\t", "\\t")
+        if display == "":
+            display = "<EMPTY>"
+        parts.append(f"{tid}:{display}")
+    return " | ".join(parts)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Triton Qwen3-0.6B inference")
     parser.add_argument("--model-path", type=str, default="qwen3-0-6B")
@@ -27,6 +40,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=1000)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"])
+    parser.add_argument("--max-new-tokens", type=int, default=None, help="Override number of tokens to generate")
+    parser.add_argument("--plain-prompt", action="store_true", help="Use prompt as-is without chat template")
+    parser.add_argument("--single-layer", action="store_true", help="Limit decoder to one layer and generate single token")
     parser.add_argument("--no-triton", action="store_true")
     parser.add_argument("--benchmark", action="store_true")
     parser.add_argument("--num-iterations", type=int, default=10)
@@ -54,12 +70,18 @@ def to_dtype(name: str) -> torch.dtype:
     return torch.float32
 
 
-def load_triton(model_dir: Path, use_triton: bool, dtype: torch.dtype):
+def load_triton(model_dir: Path, use_triton: bool, dtype: torch.dtype, single_layer: bool):
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True, trust_remote_code=True)
     hf_model = AutoModelForCausalLM.from_pretrained(
         str(model_dir), local_files_only=True, dtype=torch.float32, device_map="cpu", trust_remote_code=True
     )
+    if single_layer:
+        hf_model.config.num_hidden_layers = 1
+        hf_model.model.layers = hf_model.model.layers[:1]
     model = build_triton_model(str(model_dir / "config.json"), use_triton=use_triton, dtype=dtype)
+    if single_layer:
+        model.config.num_hidden_layers = 1
+        model.model.layers = torch.nn.ModuleList(model.model.layers[:1])
     model.to(dtype=dtype, device="cpu")
     load_triton_from_hf(hf_model, model)
     return tokenizer, hf_model, model
@@ -86,45 +108,65 @@ def parity_check(tokenizer, hf_model, triton_model, model_dir: Path, prompt: str
     print(f"max diff {diff.max().item():.3e}, mean diff {diff.mean().item():.3e}")
 
 
-def run_once(tokenizer, model, device: str, prompt: str, max_length: int, dtype: torch.dtype) -> Tuple[str, float, int]:
-    text = tokenizer.apply_chat_template([
-        {"role": "user", "content": prompt}
-    ], tokenize=False, add_generation_prompt=True)
+def run_once(tokenizer, model, device: str, prompt: str, max_length: int, max_new_tokens: Optional[int], use_chat: bool, dtype: torch.dtype, single_layer: bool) -> Tuple[str, float, int, Optional[torch.Tensor]]:
+    if use_chat:
+        text = tokenizer.apply_chat_template([
+            {"role": "user", "content": prompt}
+        ], tokenize=False, add_generation_prompt=True)
+    else:
+        text = prompt
     inputs = tokenizer([text], return_tensors="pt")
     input_ids = inputs["input_ids"][0].tolist()
-    max_new = max(1, max_length - len(input_ids))
+
+    print("Input tokens :")
+    print(f"  {format_tokens(tokenizer, input_ids)}")
+    if single_layer:
+        max_new = 1
+    elif max_new_tokens is not None:
+        max_new = max_new_tokens
+    else:
+        max_new = max(1, max_length - len(input_ids))
 
     if device == "cuda":
         torch.cuda.synchronize()
     t0 = time.time()
 
     with torch.no_grad():
-        logits, past_kvs, _ = model(
+        logits, past_kvs, hidden_states = model(
             torch.tensor([input_ids], device=device, dtype=torch.long),
             past_kvs=None,
-            use_cache=True,
+            use_cache=not single_layer,
+            output_hidden_states=single_layer,
         )
 
     generated: List[int] = []
-    for _ in range(max_new):
+    hidden_state: Optional[torch.Tensor] = None
+    if single_layer:
+        hidden_state = hidden_states[-1][0, -1, :].float().cpu()
         nxt = pick_argmax(logits[:, -1, :])
         generated.append(nxt)
-        eos = tokenizer.eos_token_id
-        if (isinstance(eos, int) and nxt == eos) or (isinstance(eos, list) and nxt in eos):
-            break
-        with torch.no_grad():
-            logits, past_kvs, _ = model(
-                torch.tensor([[nxt]], device=device, dtype=torch.long),
-                past_kvs=past_kvs,
-                use_cache=True,
-            )
+    else:
+        for _ in range(max_new):
+            nxt = pick_argmax(logits[:, -1, :])
+            generated.append(nxt)
+            eos = tokenizer.eos_token_id
+            if (isinstance(eos, int) and nxt == eos) or (isinstance(eos, list) and nxt in eos):
+                break
+            with torch.no_grad():
+                logits, past_kvs, _ = model(
+                    torch.tensor([[nxt]], device=device, dtype=torch.long),
+                    past_kvs=past_kvs,
+                    use_cache=True,
+                )
 
     if device == "cuda":
         torch.cuda.synchronize()
     t1 = time.time()
 
     text_out = tokenizer.decode(input_ids + generated, skip_special_tokens=True)
-    return text_out, t1 - t0, len(generated)
+    print("Generated tokens:")
+    print(f"  {format_tokens(tokenizer, generated)}")
+    return text_out, t1 - t0, len(generated), hidden_state
 
 
 def main():
@@ -141,7 +183,10 @@ def main():
     if not args.no_triton:
         print("kernels: embedding, linear, rmsnorm, rope, attention, swiglu, kv-cache, argmax")
 
-    tokenizer, hf_model, triton_model = load_triton(model_dir, use_triton=not args.no_triton, dtype=dtype)
+    tokenizer, hf_model, triton_model = load_triton(model_dir, use_triton=not args.no_triton, dtype=dtype, single_layer=args.single_layer)
+
+    generate_tokens = args.max_new_tokens if args.max_new_tokens is not None else None
+    use_chat_template = not args.plain_prompt
 
     if args.parity:
         parity_check(tokenizer, hf_model, triton_model, model_dir, args.prompt, args.device, dtype)
@@ -154,7 +199,7 @@ def main():
     if args.benchmark:
         latencies, tokens = [], []
         for _ in range(args.num_iterations):
-            _, lat, tok = run_once(tokenizer, triton_model, args.device, args.prompt, args.max_length, dtype)
+            _, lat, tok, _ = run_once(tokenizer, triton_model, args.device, args.prompt, args.max_length, generate_tokens, use_chat_template, dtype, args.single_layer)
             latencies.append(lat)
             tokens.append(tok)
         total_time = sum(latencies)
@@ -163,9 +208,12 @@ def main():
         print(f"throughput  {sum(tokens)/max(total_time, 1e-6):.2f} tok/s")
         return
 
-    out, lat, tok = run_once(tokenizer, triton_model, args.device, args.prompt, args.max_length, dtype)
+    out, lat, tok, _ = run_once(tokenizer, triton_model, args.device, args.prompt, args.max_length, generate_tokens, use_chat_template, dtype, args.single_layer)
     print(out)
-    print(f"time {lat:.3f}s | tokens {tok} | {tok/max(lat, 1e-6):.2f} tok/s")
+    print("=" * 60)
+    print(f"Generation time: {lat:.3f}s")
+    print(f"Tokens generated: {tok}")
+    print(f"Throughput: {tok/max(lat, 1e-6):.2f} tokens/s")
 
 
 if __name__ == "__main__":

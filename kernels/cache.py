@@ -57,7 +57,6 @@ def _kv_concat_kernel(
 
 def triton_kv_concat(past: torch.Tensor, current: torch.Tensor) -> torch.Tensor:
     """Concat along sequence dimension using Triton (for KV cache)."""
-    assert past.is_cuda and current.is_cuda
     assert past.dtype == current.dtype
     assert past.shape[0] == current.shape[0]
     assert past.shape[1] == current.shape[1]

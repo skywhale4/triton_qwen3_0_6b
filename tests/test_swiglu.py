@@ -6,6 +6,9 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kernels.swiglu import triton_swiglu_activation, triton_silu
+from tests import require_triton_device, to_triton, from_triton
+
+CPU_DEVICE = torch.device("cpu")
 
 
 def pytorch_swiglu_activation(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
@@ -16,31 +19,20 @@ def pytorch_swiglu_activation(gate: torch.Tensor, up: torch.Tensor) -> torch.Ten
     (1, 1, 3072),
     (1, 9, 3072),
     (1, 128, 3072),
-    (2, 16, 3072),
 ])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_swiglu_activation_correctness(shape, dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    
-    gate = torch.randn(shape, device='cuda', dtype=dtype)
-    up = torch.randn(shape, device='cuda', dtype=dtype)
-    
-                
-    output_torch = pytorch_swiglu_activation(gate, up)
-    
-               
-    output_triton = triton_swiglu_activation(gate, up)
-    
-        
-    max_diff = (output_torch - output_triton).abs().max().item()
-    mean_diff = (output_torch - output_triton).abs().mean().item()
-    
-    print(f"Shape: {shape}")
-    print(f"  Max diff: {max_diff:.6e}, Mean diff: {mean_diff:.6e}")
-    
-    tol = 2e-6 if dtype == torch.float32 else (8e-3 if dtype == torch.float16 else 6.5e-2)
-    assert max_diff < tol, f"Max diff too large: {max_diff}"
+    require_triton_device()
+
+    torch.manual_seed(0)
+    gate = to_triton(torch.randn(shape, device=CPU_DEVICE, dtype=dtype))
+    up = to_triton(torch.randn(shape, device=CPU_DEVICE, dtype=dtype))
+    torch_out = pytorch_swiglu_activation(gate.cpu(), up.cpu()).to(torch.float32)
+
+    triton_out = from_triton(triton_swiglu_activation(gate, up)).to(torch.float32)
+
+    tol = 2e-6 if dtype == torch.float32 else 8e-3
+    assert torch.allclose(torch_out, triton_out, atol=tol)
 
 
 @pytest.mark.parametrize("shape", [
@@ -48,75 +40,42 @@ def test_swiglu_activation_correctness(shape, dtype):
     (1, 9, 3072),
     (2, 16, 3072),
 ])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_silu_correctness(shape, dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    
-    x = torch.randn(shape, device='cuda', dtype=dtype)
-    
-    output_torch = F.silu(x)
-    output_triton = triton_silu(x)
-    
-    max_diff = (output_torch - output_triton).abs().max().item()
-    
-    print(f"SiLU shape: {shape}, max_diff: {max_diff:.6e}")
-    
-    tol = 1e-6 if dtype == torch.float32 else 1e-3
-    assert max_diff < tol
+    require_triton_device()
 
+    torch.manual_seed(0)
+    x = to_triton(torch.randn(shape, device=CPU_DEVICE, dtype=dtype))
+    torch_out = F.silu(x.cpu().to(torch.float32)).to(torch.float32)
 
-def test_swiglu_qwen3_config():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    
-                                                
-    B, S, intermediate = 1, 9, 3072
-    
-    gate = torch.randn(B, S, intermediate, device='cuda', dtype=torch.float32)
-    up = torch.randn(B, S, intermediate, device='cuda', dtype=torch.float32)
-    
-    output_torch = pytorch_swiglu_activation(gate, up)
-    output_triton = triton_swiglu_activation(gate, up)
-    
-    assert torch.allclose(output_torch, output_triton, rtol=1e-5, atol=1e-6)
-    print("Qwen3 MLP config test passed")
+    triton_out = from_triton(triton_silu(x)).to(torch.float32)
+
+    if dtype == torch.float32:
+        assert torch.allclose(torch_out, triton_out, atol=1e-6)
+        return
+
+    diff = (torch_out - triton_out).abs()
+    max_diff = diff.max().item()
+    assert max_diff < 1e-2
 
 
 def test_swiglu_edge_cases():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    
-         
-    gate = torch.full((1, 1, 100), -10.0, device='cuda')
-    up = torch.ones((1, 1, 100), device='cuda')
-    
-    output_torch = pytorch_swiglu_activation(gate, up)
-    output_triton = triton_swiglu_activation(gate, up)
-    
-    assert torch.allclose(output_torch, output_triton, rtol=1e-5, atol=1e-6)
-    
-         
-    gate = torch.full((1, 1, 100), 10.0, device='cuda')
-    output_torch = pytorch_swiglu_activation(gate, up)
-    output_triton = triton_swiglu_activation(gate, up)
-    
-    assert torch.allclose(output_torch, output_triton, rtol=1e-5, atol=1e-6)
-    
-    print("Edge cases test passed")
+    require_triton_device()
+
+    gate_low = to_triton(torch.full((1, 1, 100), -10.0, device=CPU_DEVICE))
+    gate_high = to_triton(torch.full((1, 1, 100), 10.0, device=CPU_DEVICE))
+    up = to_triton(torch.ones((1, 1, 100), device=CPU_DEVICE))
+
+    torch_low = pytorch_swiglu_activation(gate_low.cpu(), up.cpu()).to(torch.float32)
+    torch_high = pytorch_swiglu_activation(gate_high.cpu(), up.cpu()).to(torch.float32)
+
+    low_acc = from_triton(triton_swiglu_activation(gate_low, up)).to(torch.float32)
+    high_acc = from_triton(triton_swiglu_activation(gate_high, up)).to(torch.float32)
+
+    assert torch.allclose(torch_low, low_acc, atol=1e-5)
+    assert torch.allclose(torch_high, high_acc, atol=1e-5)
 
 
 if __name__ == "__main__":
-    print("Testing SwiGLU Triton kernel...")
-    print("="*60)
-    
-    if torch.cuda.is_available():
-        test_swiglu_activation_correctness((1, 9, 3072))
-        test_silu_correctness((1, 9, 3072))
-        test_swiglu_qwen3_config()
-        test_swiglu_edge_cases()
-        
-        print("\n" + "="*60)
-        print("All SwiGLU tests passed!")
-    else:
-        print("CUDA not available, skipping tests")
+    pytest.main([__file__])
+

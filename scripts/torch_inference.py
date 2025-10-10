@@ -20,17 +20,33 @@ def decode_text(tokenizer, gen_ids: List[int]) -> str:
     return tokenizer.decode(gen_ids, skip_special_tokens=True)
 
 
+def format_tokens(tokenizer, token_ids: List[int]) -> str:
+    if not token_ids:
+        return "<empty>"
+    parts = []
+    for tid in token_ids:
+        text = tokenizer.decode([tid], skip_special_tokens=False)
+        display = text.replace("\n", "\\n").replace("\t", "\\t")
+        if display == "":
+            display = "<EMPTY>"
+        parts.append(f"{tid}:{display}")
+    return " | ".join(parts)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Qwen3-0.6B Torch Inference (manual forward)")
     parser.add_argument("--model-path", type=str, default="qwen3-0-6B", help="相对项目根目录的模型目录")
     parser.add_argument("--prompt", type=str, default="What is the capital of France?", help="输入提示")
     parser.add_argument("--max-length", type=int, default=1000, help="最大总长度（与 hf_inference 对齐）")
+    parser.add_argument("--max-new-tokens", type=int, default=None, help="显式控制续写长度")
+    parser.add_argument("--plain-prompt", action="store_true", help="不使用 chat 模板，直接将 prompt 输入模型")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="cuda/cpu")
     parser.add_argument("--benchmark", action="store_true", help="基准测试模式（多次迭代）")
     parser.add_argument("--num-iterations", type=int, default=10, help="基准测试迭代次数")
     parser.add_argument("--parity", action="store_true", help="与HF logits对齐检测后退出")
     parser.add_argument("--parity-layers", action="store_true", help="逐层对齐：打印各层隐藏状态/最终logits差异")
     parser.add_argument("--debug-single-layer", action="store_true", help="调试模式：只运行第一层并打印所有中间张量")
+    parser.add_argument("--single-layer", action="store_true", help="仅保留单层并直接根据隐藏状态生成")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -66,13 +82,19 @@ def main():
 
     torch_model = build_model_from_config(str(model_dir / "config.json"))
     torch_model.to(dtype=torch.float32, device="cpu")
+    if args.single_layer:
+        torch_model.config.num_hidden_layers = 1
+        torch_model.model.layers = torch.nn.ModuleList(torch_model.model.layers[:1])
     load_from_hf(hf_model, torch_model)
 
                                        
     if args.parity or args.parity_layers:
         tok = tokenizer
-        messages = [{"role": "user", "content": args.prompt}]
-        text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        if args.plain_prompt:
+            text = args.prompt
+        else:
+            messages = [{"role": "user", "content": args.prompt}]
+            text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inp = tok([text], return_tensors="pt")
         with torch.no_grad():
                                            
@@ -106,6 +128,8 @@ def main():
                               
     torch_model.to(args.device, dtype=torch.float32)
     torch_model.eval()
+    if args.single_layer:
+        torch_model.model.debug_single_layer = True
     
             
     if args.debug_single_layer:
@@ -115,11 +139,14 @@ def main():
         torch_model.set_debug_mode(debug=True, single_layer=True)
 
     def run_once(prompt: str, debug_print: bool = False) -> Tuple[str, float, int]:
-        messages = [{"role": "user", "content": prompt}]
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        if args.plain_prompt:
+            text = prompt
+        else:
+            messages = [{"role": "user", "content": prompt}]
+            text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
-        if debug_print:
-            print("\nProcessed input (after chat template formatting):")
+        if debug_print and not args.plain_prompt:
+            print("\nProcessed input (after prompt formatting):")
             print("=" * 60)
             print(text)
             print("=" * 60)
@@ -127,8 +154,17 @@ def main():
         inputs = tokenizer([text], return_tensors="pt")
         input_ids = inputs["input_ids"][0].tolist()
 
+        print("Input tokens :")
+        print(f"  {format_tokens(tokenizer, input_ids)}")
+
                                                                    
-        max_new_tokens = max(1, args.max_length - len(input_ids))
+        if args.max_new_tokens is not None:
+            max_new_tokens = max(1, args.max_new_tokens)
+        else:
+            max_new_tokens = max(1, args.max_length - len(input_ids))
+
+        if args.single_layer:
+            max_new_tokens = 1
 
         if args.device == "cuda":
             torch.cuda.synchronize()
@@ -149,21 +185,31 @@ def main():
             return "", 0.0, 0
 
         generated: List[int] = []
-        for _ in range(max_new_tokens):
-            next_id = sample_next_argmax(logits[:, -1, :])
+        hidden_state = None
+        if args.single_layer:
+            inputs_tensor = torch.tensor([input_ids], device=args.device, dtype=torch.long)
+            hidden_out, _, _ = torch_model.model(
+                inputs_tensor,
+                past_kvs=None,
+                use_cache=False,
+                output_hidden_states=False,
+            )
+            hidden_state = hidden_out[0, -1, :].float().cpu()
+            lm_logits = torch_model.lm_head(hidden_out[:, -1:, :])
+            next_id = sample_next_argmax(lm_logits[:, 0, :])
             generated.append(next_id)
-            eos_ids = tokenizer.eos_token_id
-            if isinstance(eos_ids, int):
-                if next_id == eos_ids:
-                    break
-            elif isinstance(eos_ids, list) and next_id in eos_ids:
-                break
+        else:
             with torch.no_grad():
                 logits, past_kvs, _ = torch_model(
-                    torch.tensor([[next_id]], device=args.device, dtype=torch.long),
-                    past_kvs=past_kvs,
+                    torch.tensor([input_ids], device=args.device, dtype=torch.long),
+                    past_kvs=None,
                     use_cache=True,
                 )
+
+            # ... existing code ...
+
+        print("Generated tokens:")
+        print(f"  {format_tokens(tokenizer, generated)}")
 
         if args.device == "cuda":
             torch.cuda.synchronize()
@@ -213,28 +259,12 @@ def main():
         print(f"Min latency: {min(latencies):.3f}s")
         print(f"Max latency: {max(latencies):.3f}s")
     else:
-        print(f"\nPrompt: {args.prompt}")
-        print(f"Generating (max_length={args.max_length})...\n")
-        messages = [{"role": "user", "content": args.prompt}]
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        print("Processed input (after chat template formatting):")
-        print("=" * 60)
-        print(text)
-        print("=" * 60 + "\n")
-
-        inputs = tokenizer([text], return_tensors="pt")
-        print(f"Input tensor shape: {inputs['input_ids'].shape}")
-        print(f"Input tensor: {inputs['input_ids']}\n")
-
-        input_ids_list = inputs["input_ids"][0].tolist()
-        print("Input tokens breakdown:")
-        print("=" * 80)
-        print(f"{'Token ID':<12} {'Token Text':<30} {'Decoded Text':<40}")
-        print("-" * 80)
-        for tid in input_ids_list:
-            decoded_token = tokenizer.decode([tid], skip_special_tokens=False)
-            print(f"{tid:<12} {'[' + str(tid) + ']':<30} {repr(decoded_token):<40}")
-        print("=" * 80 + "\n")
+        if args.plain_prompt:
+            text = args.prompt
+        else:
+            messages = [{"role": "user", "content": args.prompt}]
+            text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        _ = tokenizer([text], return_tensors="pt")
 
         out, lat, ntok = run_once(args.prompt, debug_print=False)
         print(f"Generated text:\n{out}\n")

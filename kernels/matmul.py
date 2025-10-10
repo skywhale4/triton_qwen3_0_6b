@@ -57,8 +57,6 @@ def _promote_dtype(a: torch.Tensor, b: torch.Tensor) -> torch.dtype:
 
 
 def triton_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-
-    assert a.is_cuda and b.is_cuda
     assert a.shape[-1] == b.shape[-2], f"Shape mismatch: {a.shape} @ {b.shape}"
     
             

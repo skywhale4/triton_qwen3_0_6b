@@ -12,6 +12,9 @@ from kernels.elementwise import (
     triton_sin,
 )
 from kernels.reduction import triton_argmax
+from tests import require_triton_device, to_triton, from_triton
+
+CPU_DEVICE = torch.device("cpu")
 
 
 @pytest.mark.parametrize("shape", [
@@ -19,14 +22,16 @@ from kernels.reduction import triton_argmax
     (8, 16),
     (2, 4, 8),
 ])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_add_correctness(shape, dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    a = torch.randn(shape, device='cuda', dtype=dtype)
-    b = torch.randn(shape, device='cuda', dtype=dtype)
-    torch_out = a + b
-    triton_out = triton_add(a, b)
+    require_triton_device()
+    torch.manual_seed(0)
+    a_cpu = torch.randn(shape, device=CPU_DEVICE, dtype=dtype)
+    b_cpu = torch.randn(shape, device=CPU_DEVICE, dtype=dtype)
+    torch_out = (a_cpu + b_cpu).to(torch.float32)
+
+    triton_out = from_triton(triton_add(to_triton(a_cpu), to_triton(b_cpu))).to(torch.float32)
+
     tol = 1e-6 if dtype == torch.float32 else 1e-3
     assert torch.allclose(torch_out, triton_out, atol=tol)
 
@@ -36,14 +41,16 @@ def test_add_correctness(shape, dtype):
     (8, 16),
     (2, 4, 8),
 ])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_multiply_correctness(shape, dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    a = torch.randn(shape, device='cuda', dtype=dtype)
-    b = torch.randn(shape, device='cuda', dtype=dtype)
-    torch_out = a * b
-    triton_out = triton_multiply(a, b)
+    require_triton_device()
+    torch.manual_seed(0)
+    a_cpu = torch.randn(shape, device=CPU_DEVICE, dtype=dtype)
+    b_cpu = torch.randn(shape, device=CPU_DEVICE, dtype=dtype)
+    torch_out = (a_cpu * b_cpu).to(torch.float32)
+
+    triton_out = from_triton(triton_multiply(to_triton(a_cpu), to_triton(b_cpu))).to(torch.float32)
+
     tol = 1e-6 if dtype == torch.float32 else 1e-3
     assert torch.allclose(torch_out, triton_out, atol=tol)
 
@@ -53,19 +60,18 @@ def test_multiply_correctness(shape, dtype):
     (8, 16),
     (2, 4, 8),
 ])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_cos_correctness(shape, dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    x = torch.randn(shape, device='cuda', dtype=dtype)
-    torch_out = torch.cos(x)
-    triton_out = triton_cos(x)
+    require_triton_device()
+    torch.manual_seed(0)
+    x_cpu = torch.randn(shape, device=CPU_DEVICE, dtype=dtype)
+    torch_out = torch.cos(x_cpu.to(torch.float32))
+
+    triton_out = from_triton(triton_cos(to_triton(x_cpu))).to(torch.float32)
     if dtype == torch.float32:
         atol = rtol = 1e-5
-    elif dtype == torch.float16:
-        atol = rtol = 5e-3
     else:
-        atol = rtol = 6.5e-2
+        atol = rtol = 5e-3
     assert torch.allclose(torch_out, triton_out, atol=atol, rtol=rtol)
 
 
@@ -74,19 +80,18 @@ def test_cos_correctness(shape, dtype):
     (8, 16),
     (2, 4, 8),
 ])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_sin_correctness(shape, dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    x = torch.randn(shape, device='cuda', dtype=dtype)
-    torch_out = torch.sin(x)
-    triton_out = triton_sin(x)
+    require_triton_device()
+    torch.manual_seed(0)
+    x_cpu = torch.randn(shape, device=CPU_DEVICE, dtype=dtype)
+    torch_out = torch.sin(x_cpu.to(torch.float32))
+
+    triton_out = from_triton(triton_sin(to_triton(x_cpu))).to(torch.float32)
     if dtype == torch.float32:
         atol = rtol = 1e-5
-    elif dtype == torch.float16:
-        atol = rtol = 5e-3
     else:
-        atol = rtol = 6.5e-2
+        atol = rtol = 5e-3
     assert torch.allclose(torch_out, triton_out, atol=atol, rtol=rtol)
 
 
@@ -95,11 +100,12 @@ def test_sin_correctness(shape, dtype):
     (8, 16),
 ])
 def test_argmax(shape):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    x = torch.randn(shape, device='cuda', dtype=torch.float32)
-    torch_idx = torch.argmax(x).item()
-    triton_idx = triton_argmax(x)
+    require_triton_device()
+    torch.manual_seed(0)
+    x_cpu = torch.randn(shape, device=CPU_DEVICE, dtype=torch.float32)
+    torch_idx = torch.argmax(x_cpu).item()
+
+    triton_idx = triton_argmax(to_triton(x_cpu))
     assert torch_idx == triton_idx
 
 

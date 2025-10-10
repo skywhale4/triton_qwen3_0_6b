@@ -47,8 +47,6 @@ def _repeat_heads_kernel(
 
 
 def triton_repeat_kv_heads(x: torch.Tensor, groups: int) -> torch.Tensor:
-
-    assert x.is_cuda
     assert x.dim() == 4                  
     B, H_src, S, D = x.shape
     H_dst = H_src * groups

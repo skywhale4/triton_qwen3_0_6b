@@ -31,12 +31,28 @@ def sample_next_argmax(logits: torch.Tensor) -> int:
     return int(torch.argmax(logits.squeeze(0)).item())
 
 
+def format_tokens(tokenizer, token_ids):
+    if not token_ids:
+        return "<empty>"
+    parts = []
+    for tid in token_ids:
+        text = tokenizer.decode([tid], skip_special_tokens=False)
+        display = text.replace("\n", "\\n").replace("\t", "\\t")
+        if display == "":
+            display = "<EMPTY>"
+        parts.append(f"{tid}:{display}")
+    return " | ".join(parts)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Qwen3-0.6B HF Inference (显式前向)")
     parser.add_argument("--model-path", type=str, default="./qwen3-0-6B", help="模型目录")
     parser.add_argument("--prompt", type=str, default="What is the capital of France?", help="输入提示")
     parser.add_argument("--max-length", type=int, default=1000, help="最大总长度")
+    parser.add_argument("--max-new-tokens", type=int, default=None, help="显式控制续写长度")
+    parser.add_argument("--plain-prompt", action="store_true", help="不使用 chat 模板，直接将 prompt 输入模型")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="cuda/cpu")
+    parser.add_argument("--single-layer", action="store_true", help="仅保留单层 decoder，并直接取当前隐藏状态生成下一个 token")
     parser.add_argument("--benchmark", action="store_true", help="基准测试模式（多次迭代）")
     parser.add_argument("--num-iterations", type=int, default=10, help="基准测试迭代次数")
     parser.add_argument("--debug-single-layer", action="store_true", help="调试模式：只运行第一层并打印所有中间张量")
@@ -56,10 +72,10 @@ def main():
         device_map=args.device,
         trust_remote_code=True
     )
+    if args.single_layer:
+        model.config.num_hidden_layers = 1
+        model.model.layers = model.model.layers[:1]
     model.eval()
-    
-    print(f"\nModel loaded successfully!")
-    print(f"Model size: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M parameters\n")
     
                                 
     if args.debug_single_layer:
@@ -100,18 +116,24 @@ def main():
         layer_0.mlp.down_proj.register_forward_hook(make_capture_hook('down_proj'))
     
     def run_once_hf(prompt: str, debug_print: bool = False):
-        messages = [{"role": "user", "content": prompt}]
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        if debug_print:
-            print("Processed input (after chat template formatting):")
-            print("=" * 60)
-            print(text)
-            print("=" * 60 + "\n")
+        if args.plain_prompt:
+            text = prompt
+        else:
+            messages = [{"role": "user", "content": prompt}]
+            text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
         inputs = tokenizer([text], return_tensors="pt").to(args.device)
         input_ids = inputs["input_ids"][0].tolist()
 
-        max_new_tokens = max(1, args.max_length - len(input_ids))
+        print("Input tokens :")
+        print(f"  {format_tokens(tokenizer, input_ids)}")
+
+        if args.single_layer:
+            max_new_tokens = 1
+        elif args.max_new_tokens is not None:
+            max_new_tokens = max(1, args.max_new_tokens)
+        else:
+            max_new_tokens = max(1, args.max_length - len(input_ids))
 
         if args.device == "cuda":
             torch.cuda.synchronize()
@@ -181,27 +203,34 @@ def main():
             logits = outputs.logits
 
                                            
-        hidden = outputs.hidden_states[-1][0, -1, :].cpu().float()
-        print("[HF] Prefill hidden_state (last token, first 50):")
-        print(hidden[:50].tolist())
-        print()
-
         generated: List[int] = []
-        for _ in range(max_new_tokens):
-            next_id = sample_next_argmax(logits[:, -1, :])
+        hidden_state: Optional[torch.Tensor] = None
+
+        if args.single_layer:
+            outputs = model(input_ids=inputs["input_ids"], use_cache=False, output_hidden_states=True)
+            logits = outputs.logits
+            hidden_state = outputs.hidden_states[-1][0, -1, :].to(torch.float32).cpu()
+            next_id = sample_next_argmax(logits[:, -1, :].to(torch.float32))
             generated.append(next_id)
-            eos_ids = tokenizer.eos_token_id
-            if isinstance(eos_ids, int):
-                if next_id == eos_ids:
+        else:
+            for _ in range(max_new_tokens):
+                next_id = sample_next_argmax(logits[:, -1, :])
+                generated.append(next_id)
+                eos_ids = tokenizer.eos_token_id
+                if isinstance(eos_ids, int):
+                    if next_id == eos_ids:
+                        break
+                elif isinstance(eos_ids, list) and next_id in eos_ids:
                     break
-            elif isinstance(eos_ids, list) and next_id in eos_ids:
-                break
-                         
-            inp_next = torch.tensor([[next_id]], device=args.device, dtype=torch.long)
-            with torch.no_grad():
-                outputs = model(input_ids=inp_next, past_key_values=past_kvs, use_cache=True)
-                past_kvs = outputs.past_key_values
-                logits = outputs.logits
+                             
+                inp_next = torch.tensor([[next_id]], device=args.device, dtype=torch.long)
+                with torch.no_grad():
+                    outputs = model(input_ids=inp_next, past_key_values=past_kvs, use_cache=True)
+                    past_kvs = outputs.past_key_values
+                    logits = outputs.logits
+
+        print("Generated tokens:")
+        print(f"  {format_tokens(tokenizer, generated)}")
 
         if args.device == "cuda":
             torch.cuda.synchronize()
@@ -249,8 +278,6 @@ def main():
         print(f"Max latency: {max(latencies):.3f}s")
         
     else:
-        print(f"Prompt: {args.prompt}")
-        print(f"Generating (max_length={args.max_length})...\n")
         out, lat, ntok = run_once_hf(args.prompt, debug_print=True)
         print(f"\nGenerated text:\n{out}\n")
         print("=" * 60)

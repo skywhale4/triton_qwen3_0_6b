@@ -57,8 +57,6 @@ def triton_swiglu_activation(
     gate: torch.Tensor,
     up: torch.Tensor,
 ) -> torch.Tensor:
-
-    assert gate.is_cuda and up.is_cuda
     assert gate.shape == up.shape
     
         
@@ -81,8 +79,6 @@ def triton_swiglu_activation(
 
 
 def triton_silu(x: torch.Tensor) -> torch.Tensor:
-
-    assert x.is_cuda
     
     x_flat = x.reshape(-1)
     n_elements = x_flat.numel()

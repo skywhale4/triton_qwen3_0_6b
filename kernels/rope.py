@@ -55,8 +55,6 @@ def triton_rope(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> torch.Tensor:
-
-    assert x.is_cuda and cos.is_cuda and sin.is_cuda
     
     B, H, S, D = x.shape
     
