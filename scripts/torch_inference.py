@@ -199,14 +199,24 @@ def main():
             next_id = sample_next_argmax(lm_logits[:, 0, :])
             generated.append(next_id)
         else:
-            with torch.no_grad():
-                logits, past_kvs, _ = torch_model(
-                    torch.tensor([input_ids], device=args.device, dtype=torch.long),
-                    past_kvs=None,
-                    use_cache=True,
-                )
+            eos_token = tokenizer.eos_token_id
+            for _ in range(max_new_tokens):
+                next_id = sample_next_argmax(logits[:, -1, :])
+                generated.append(next_id)
 
-            # ... existing code ...
+                if isinstance(eos_token, int):
+                    if next_id == eos_token:
+                        break
+                elif isinstance(eos_token, list):
+                    if next_id in eos_token:
+                        break
+
+                with torch.no_grad():
+                    logits, past_kvs, _ = torch_model(
+                        torch.tensor([[next_id]], device=args.device, dtype=torch.long),
+                        past_kvs=past_kvs,
+                        use_cache=True,
+                    )
 
         print("Generated tokens:")
         print(f"  {format_tokens(tokenizer, generated)}")

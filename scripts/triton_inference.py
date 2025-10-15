@@ -146,15 +146,21 @@ def run_once(tokenizer, model, device: str, prompt: str, max_length: int, max_ne
         nxt = pick_argmax(logits[:, -1, :])
         generated.append(nxt)
     else:
+        eos_token = tokenizer.eos_token_id
         for _ in range(max_new):
-            nxt = pick_argmax(logits[:, -1, :])
-            generated.append(nxt)
-            eos = tokenizer.eos_token_id
-            if (isinstance(eos, int) and nxt == eos) or (isinstance(eos, list) and nxt in eos):
-                break
+            next_id = pick_argmax(logits[:, -1, :])
+            generated.append(next_id)
+
+            if isinstance(eos_token, int):
+                if next_id == eos_token:
+                    break
+            elif isinstance(eos_token, list):
+                if next_id in eos_token:
+                    break
+
             with torch.no_grad():
                 logits, past_kvs, _ = model(
-                    torch.tensor([[nxt]], device=device, dtype=torch.long),
+                    torch.tensor([[next_id]], device=device, dtype=torch.long),
                     past_kvs=past_kvs,
                     use_cache=True,
                 )
